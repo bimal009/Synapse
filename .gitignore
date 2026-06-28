@@ -1,0 +1,52 @@
+# ---- Build output ----
+/bin/
+/build/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+synapse
+synapse.exe
+
+# ---- Go ----
+*.test
+*.out
+coverage.*
+vendor/
+go.work
+go.work.sum
+
+# ---- Wails ----
+# Generated bindings can be regenerated with `wails generate`.
+frontend/wailsjs/
+
+# ---- Frontend (Node / Vite) ----
+node_modules/
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo
+.vite/
+
+# ---- Databases / local data ----
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# ---- Logs ----
+*.log
+logs/
+
+# ---- Environment / secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
