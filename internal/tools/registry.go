@@ -4,37 +4,13 @@ import "github.com/ollama/ollama/api"
 
 func DefaultTools() []api.Tool {
 	return []api.Tool{
-		folderTreeTool(),
 		executeTool(),
 		fsTool(),
 		askTool(),
 		dagTool(),
 		getDagTool(),
+		deleteDagTool(),
 		currentTimeTool(),
-	}
-}
-
-func folderTreeTool() api.Tool {
-	props := api.NewToolPropertiesMap()
-	props.Set("path", api.ToolProperty{
-		Type:        api.PropertyType{"string"},
-		Description: `Optional subdirectory to list, relative to the project root (e.g. ".synapse/skills"). Omit to list from the project root.`,
-	})
-	props.Set("max_depth", api.ToolProperty{
-		Type:        api.PropertyType{"integer"},
-		Description: "Optional maximum depth to descend. Defaults to 4.",
-	})
-
-	return api.Tool{
-		Type: "function",
-		Function: api.ToolFunction{
-			Name:        "folder_tree",
-			Description: "List the project's folder tree (directories and files) so you can see exactly what exists. Call this FIRST, before reading or writing any file, to discover real paths instead of guessing.",
-			Parameters: api.ToolFunctionParameters{
-				Type:       "object",
-				Properties: props,
-			},
-		},
 	}
 }
 
@@ -141,25 +117,50 @@ func fsTool() api.Tool {
 }
 
 func dagTool() api.Tool {
+	strItems := map[string]any{"type": "string"}
+	taskSchema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"id":           map[string]any{"type": "string", "description": "Unique snake_case task id (e.g. validate_schema)."},
+			"title":        map[string]any{"type": "string", "description": "Short task title."},
+			"description":  map[string]any{"type": "string", "description": "What the task does (recommended)."},
+			"dependencies": map[string]any{"type": "array", "items": strItems, "description": "Ids of tasks that must finish before this one."},
+			"inputs":       map[string]any{"type": "array", "items": strItems, "description": "Artifact names this task consumes."},
+			"outputs":      map[string]any{"type": "array", "items": strItems, "description": "Artifact names this task produces."},
+			"model_role":   map[string]any{"type": "string", "description": "Agent role that runs this task (one of the available roles)."},
+			"priority":     map[string]any{"type": "integer", "description": "Higher = scheduled first among ready tasks. Optional, defaults to 0."},
+		},
+		"required": []any{"id", "title"},
+	}
+
 	props := api.NewToolPropertiesMap()
-	props.Set("dag", api.ToolProperty{
-		Type: api.PropertyType{"string"},
-		Description: `The full execution plan as a JSON object: ` +
-			`{"id","objective","failure_policy":"block|skip|recover",` +
-			`"tasks":[{"id","title","description","dependencies":[...],` +
-			`"inputs":[...],"outputs":[...],"model_role":"...","status":"pending"}]}. ` +
-			`Provide the entire plan in one call. Task ids must be unique, ` +
-			`dependencies must reference existing tasks, and the graph must be acyclic.`,
+	props.Set("id", api.ToolProperty{
+		Type:        api.PropertyType{"string"},
+		Description: "Short identifier for the plan, e.g. chat-app-dag.",
+	})
+	props.Set("objective", api.ToolProperty{
+		Type:        api.PropertyType{"string"},
+		Description: "One-line statement of what the plan achieves.",
+	})
+	props.Set("failure_policy", api.ToolProperty{
+		Type:        api.PropertyType{"string"},
+		Enum:        []any{"block", "skip", "recover"},
+		Description: "How the graph reacts to a task failure. Defaults to block.",
+	})
+	props.Set("tasks", api.ToolProperty{
+		Type:        api.PropertyType{"array"},
+		Items:       taskSchema,
+		Description: "All tasks in the plan, as structured objects (not a JSON string).",
 	})
 
 	return api.Tool{
 		Type: "function",
 		Function: api.ToolFunction{
 			Name:        "create_dag",
-			Description: "Validate the full task DAG and save it to the database for this chat. If validation fails, the error explains what to fix — correct the plan and call create_dag again. Overwrites any existing DAG for the chat.",
+			Description: "Create or replace this chat's task DAG and validate it. Pass the plan as structured fields (id, objective, failure_policy, tasks[]) in one call — not a JSON string. Task ids must be unique and the graph must be acyclic. Tasks already in progress keep their status. On validation error, fix the plan and call create_dag again.",
 			Parameters: api.ToolFunctionParameters{
 				Type:       "object",
-				Required:   []string{"dag"},
+				Required:   []string{"id", "objective", "tasks"},
 				Properties: props,
 			},
 		},
@@ -171,10 +172,31 @@ func getDagTool() api.Tool {
 		Type: "function",
 		Function: api.ToolFunction{
 			Name:        "get_dag",
-			Description: "Read the current task DAG for this chat from the database and return it as JSON. Takes no arguments. Use this instead of reading any file to see the plan.",
+			Description: "Read the current task DAG for this chat and return it as JSON. Takes no arguments. Use this instead of reading any file to see the plan.",
 			Parameters: api.ToolFunctionParameters{
 				Type:       "object",
 				Properties: api.NewToolPropertiesMap(),
+			},
+		},
+	}
+}
+
+func deleteDagTool() api.Tool {
+	props := api.NewToolPropertiesMap()
+	props.Set("id", api.ToolProperty{
+		Type:        api.PropertyType{"string"},
+		Description: "Id of the task to remove from the plan.",
+	})
+
+	return api.Tool{
+		Type: "function",
+		Function: api.ToolFunction{
+			Name:        "delete_dag",
+			Description: "Delete a single task (by id) from this chat's DAG. Refuses if the task's status has changed (already in progress or done). Use it to drop a wrong task, then add a corrected one with create_dag.",
+			Parameters: api.ToolFunctionParameters{
+				Type:       "object",
+				Required:   []string{"id"},
+				Properties: props,
 			},
 		},
 	}

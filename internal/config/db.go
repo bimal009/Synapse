@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bimal009/Synapse/internal/models"
@@ -104,6 +105,7 @@ func (d *databaseInitilization) migrate() error {
 			status     TEXT,
 			summary    TEXT,
 			error      TEXT,
+			priority   INTEGER DEFAULT 0,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (convo_id)   REFERENCES chats(id),
 			FOREIGN KEY (session_id) REFERENCES sessions(id)
@@ -155,12 +157,6 @@ func (d *databaseInitilization) migrate() error {
 			created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 		);
 
-		CREATE TABLE IF NOT EXISTS dags (
-			convo_id   TEXT PRIMARY KEY,    -- one current DAG per chat
-			dag        TEXT NOT NULL,       -- the validated DAG as JSON
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (convo_id) REFERENCES chats(id)
-		);
 	`)
 	if err != nil {
 		return fmt.Errorf("migration failed: %w", err)
@@ -168,6 +164,14 @@ func (d *databaseInitilization) migrate() error {
 
 	if err := d.migrateChatsSchema(); err != nil {
 		return fmt.Errorf("chats migration failed: %w", err)
+	}
+
+	if err := d.migrateTaskRunsSchema(); err != nil {
+		return fmt.Errorf("task_runs migration failed: %w", err)
+	}
+
+	if err := d.migrateDagsSchema(); err != nil {
+		return fmt.Errorf("dags migration failed: %w", err)
 	}
 
 	if err := d.seedRoles(); err != nil {
@@ -178,13 +182,27 @@ func (d *databaseInitilization) migrate() error {
 }
 
 func (d *databaseInitilization) seedRoles() error {
-	for _, role := range models.AllRoles() {
+	roles := models.AllRoles()
+	for _, role := range roles {
 		if _, err := d.db.Exec(
 			`INSERT OR IGNORE INTO roles (name, description) VALUES (?, ?)`,
 			role, models.RoleDescriptions[role],
 		); err != nil {
 			return fmt.Errorf("seed role %q: %w", role, err)
 		}
+	}
+
+	// Remove stale roles left over from earlier seedings (e.g. the old tier
+	// names "coding"/"fast"/"planning") so the table matches AllRoles().
+	placeholders := make([]string, len(roles))
+	args := make([]any, len(roles))
+	for i, role := range roles {
+		placeholders[i] = "?"
+		args[i] = role
+	}
+	q := "DELETE FROM roles WHERE name NOT IN (" + strings.Join(placeholders, ", ") + ")"
+	if _, err := d.db.Exec(q, args...); err != nil {
+		return fmt.Errorf("prune stale roles: %w", err)
 	}
 	return nil
 }
@@ -210,6 +228,61 @@ func (d *databaseInitilization) migrateChatsSchema() error {
 		DROP TABLE chats;
 		ALTER TABLE chats_new RENAME TO chats;
 	`)
+	return err
+}
+
+func (d *databaseInitilization) migrateDagsSchema() error {
+	// Earlier versions stored the whole DAG as a JSON blob in dags.dag. Replace
+	// that with a structured header + per-task rows. The DAG is regenerable, so
+	// dropping the old blob table is safe.
+	if d.hasColumn("dags", "dag") {
+		if _, err := d.db.Exec(`DROP TABLE IF EXISTS dag_tasks; DROP TABLE dags;`); err != nil {
+			return err
+		}
+	}
+
+	_, err := d.db.Exec(`
+		CREATE TABLE IF NOT EXISTS dags (
+			convo_id       TEXT PRIMARY KEY,
+			id             TEXT NOT NULL,
+			objective      TEXT,
+			failure_policy TEXT,
+			updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (convo_id) REFERENCES chats(id)
+		);
+
+		CREATE TABLE IF NOT EXISTS dag_tasks (
+			convo_id              TEXT NOT NULL,
+			task_id               TEXT NOT NULL,
+			position              INTEGER NOT NULL DEFAULT 0,
+			title                 TEXT,
+			description           TEXT,
+			objective             TEXT,
+			status                TEXT,
+			model_role            TEXT,
+			owner                 TEXT,
+			priority              INTEGER DEFAULT 0,
+			timeout               INTEGER DEFAULT 0,
+			retry_max_attempts    INTEGER DEFAULT 0,
+			retry_backoff         TEXT,
+			retry_backoff_seconds INTEGER DEFAULT 0,
+			inputs                TEXT,   -- JSON array
+			outputs               TEXT,   -- JSON array
+			dependencies          TEXT,   -- JSON array
+			validation            TEXT,   -- JSON array
+			tags                  TEXT,   -- JSON array
+			PRIMARY KEY (convo_id, task_id),
+			FOREIGN KEY (convo_id) REFERENCES chats(id)
+		);
+	`)
+	return err
+}
+
+func (d *databaseInitilization) migrateTaskRunsSchema() error {
+	if d.hasColumn("task_runs", "priority") {
+		return nil
+	}
+	_, err := d.db.Exec(`ALTER TABLE task_runs ADD COLUMN priority INTEGER DEFAULT 0`)
 	return err
 }
 

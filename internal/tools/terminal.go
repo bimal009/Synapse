@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
-	"sort"
 	"strings"
 	"time"
 
@@ -41,7 +40,6 @@ type Terminal interface {
 	FsUpdate(ctx context.Context, chatID, projectPath, path, content string) (string, error)
 	FsReplace(ctx context.Context, chatID, projectPath, path, oldText, newText string) (string, error)
 	FsDelete(ctx context.Context, chatID, projectPath, path string) (string, error)
-	FolderTree(ctx context.Context, projectPath, subPath string, maxDepth int) (string, error)
 }
 
 type terminal struct {
@@ -270,7 +268,7 @@ func (t *terminal) FsRead(ctx context.Context, chatID, projectPath, path string)
 	data, err := os.ReadFile(abs)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", suggestNotFound(projectPath, path, "read")
+			return "", fmt.Errorf("read %s: file not found", path)
 		}
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
@@ -283,7 +281,7 @@ func (t *terminal) FsUpdate(ctx context.Context, chatID, projectPath, path, cont
 		return "", err
 	}
 	if _, statErr := os.Stat(abs); statErr != nil {
-		return "", suggestNotFound(projectPath, path, "update")
+		return "", fmt.Errorf("update %s: file not found (use create first)", path)
 	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return "", fmt.Errorf("create parent dir: %w", err)
@@ -305,7 +303,7 @@ func (t *terminal) FsReplace(ctx context.Context, chatID, projectPath, path, old
 	data, err := os.ReadFile(abs)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", suggestNotFound(projectPath, path, "replace in")
+			return "", fmt.Errorf("replace in %s: file not found", path)
 		}
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
@@ -327,224 +325,10 @@ func (t *terminal) FsDelete(ctx context.Context, chatID, projectPath, path strin
 		return "", err
 	}
 	if _, statErr := os.Stat(abs); statErr != nil {
-		return "", suggestNotFound(projectPath, path, "delete")
+		return "", fmt.Errorf("delete %s: path not found", path)
 	}
 	if err := os.RemoveAll(abs); err != nil {
 		return "", fmt.Errorf("delete %s: %w", path, err)
 	}
 	return fmt.Sprintf("Deleted %s.", path), nil
-}
-
-func (t *terminal) FolderTree(ctx context.Context, projectPath, subPath string, maxDepth int) (string, error) {
-	if projectPath == "" {
-		return "", fmt.Errorf("no project attached to this chat")
-	}
-	root, err := filepath.Abs(projectPath)
-	if err != nil {
-		return "", fmt.Errorf("invalid project path: %w", err)
-	}
-	start := root
-	if strings.TrimSpace(subPath) != "" {
-		start, err = resolveInProject(projectPath, subPath)
-		if err != nil {
-			return "", err
-		}
-	}
-	if maxDepth <= 0 {
-		maxDepth = 4
-	}
-
-	info, err := os.Stat(start)
-	if err != nil {
-		return "", suggestNotFound(projectPath, subPath, "list")
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("%q is a file, not a directory", subPath)
-	}
-
-	rel, _ := filepath.Rel(root, start)
-	var b strings.Builder
-	b.WriteString(filepath.ToSlash(rel) + "/\n")
-
-	count := 0
-	const maxEntries = 2000
-
-	var walk func(dir string, depth int)
-	walk = func(dir string, depth int) {
-		if depth >= maxDepth || count >= maxEntries {
-			return
-		}
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			return
-		}
-		sort.Slice(entries, func(i, j int) bool {
-			if entries[i].IsDir() != entries[j].IsDir() {
-				return entries[i].IsDir()
-			}
-			return entries[i].Name() < entries[j].Name()
-		})
-		for _, e := range entries {
-			name := e.Name()
-			if e.IsDir() {
-				switch strings.ToLower(name) {
-				case ".git", "node_modules", "dist", "build", "vendor", ".next":
-					continue
-				}
-			}
-			count++
-			if count > maxEntries {
-				b.WriteString(strings.Repeat("  ", depth+1) + "... (truncated)\n")
-				return
-			}
-			indent := strings.Repeat("  ", depth+1)
-			if e.IsDir() {
-				b.WriteString(indent + name + "/\n")
-				walk(filepath.Join(dir, name), depth+1)
-			} else {
-				b.WriteString(indent + name + "\n")
-			}
-		}
-	}
-	walk(start, 0)
-
-	return b.String(), nil
-}
-
-func suggestNotFound(projectPath, path, verb string) error {
-	root, err := filepath.Abs(projectPath)
-	if err != nil {
-		return fmt.Errorf("cannot %s %q: not found", verb, path)
-	}
-
-	msg := fmt.Sprintf("cannot %s %q: not found.", verb, path)
-	if listing := nearestDirListing(root, path); listing != "" {
-		msg += "\n" + listing
-	}
-	if matches := findSimilar(root, path); len(matches) > 0 {
-		msg += "\nClosest existing paths:\n  " + strings.Join(matches, "\n  ")
-	}
-	msg += "\nRetry with an exact path from the listing above."
-	return fmt.Errorf("%s", msg)
-}
-
-// nearestDirListing finds the deepest existing ancestor directory of the
-// requested path (inside the project) and lists its immediate entries, so the
-// model can see what is actually there instead of guessing.
-func nearestDirListing(root, path string) string {
-	abs := path
-	if !filepath.IsAbs(abs) {
-		abs = filepath.Join(root, abs)
-	}
-	abs = filepath.Clean(abs)
-
-	dir := filepath.Dir(abs)
-	for {
-		if info, err := os.Stat(dir); err == nil && info.IsDir() {
-			break
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return ""
-		}
-		dir = parent
-	}
-
-	rel, err := filepath.Rel(root, dir)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return ""
-	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) == 0 {
-		return ""
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() {
-			name += "/"
-		}
-		names = append(names, name)
-		if len(names) >= 50 {
-			break
-		}
-	}
-	return fmt.Sprintf("%q exists and contains: %s", filepath.ToSlash(rel), strings.Join(names, ", "))
-}
-
-func findSimilar(root, query string) []string {
-	tokens := pathTokens(query)
-	if len(tokens) == 0 {
-		return nil
-	}
-	type hit struct {
-		path  string
-		score int
-	}
-	var hits []hit
-	visited := 0
-	filepath.WalkDir(root, func(p string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return nil
-		}
-		if d.IsDir() {
-			switch strings.ToLower(d.Name()) {
-			case ".git", "node_modules", "dist", "build", "vendor", ".next":
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		visited++
-		if visited > 20000 {
-			return filepath.SkipAll
-		}
-		rel, relErr := filepath.Rel(root, p)
-		if relErr != nil {
-			return nil
-		}
-		lower := strings.ToLower(filepath.ToSlash(rel))
-		score := 0
-		for _, tok := range tokens {
-			if strings.Contains(lower, tok) {
-				score++
-			}
-		}
-		if score > 0 {
-			hits = append(hits, hit{filepath.ToSlash(rel), score})
-		}
-		return nil
-	})
-	sort.Slice(hits, func(i, j int) bool {
-		if hits[i].score != hits[j].score {
-			return hits[i].score > hits[j].score
-		}
-		return hits[i].path < hits[j].path
-	})
-	limit := 10
-	if len(hits) < limit {
-		limit = len(hits)
-	}
-	out := make([]string, 0, limit)
-	for i := 0; i < limit; i++ {
-		out = append(out, hits[i].path)
-	}
-	return out
-}
-
-func pathTokens(s string) []string {
-	lower := strings.ToLower(s)
-	fields := strings.FieldsFunc(lower, func(r rune) bool {
-		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
-	})
-	seen := make(map[string]bool, len(fields))
-	out := make([]string, 0, len(fields))
-	for _, f := range fields {
-		if len(f) < 3 || seen[f] {
-			continue
-		}
-		seen[f] = true
-		out = append(out, f)
-	}
-	return out
 }

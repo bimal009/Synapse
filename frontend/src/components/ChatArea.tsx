@@ -9,6 +9,7 @@ interface ChatAreaProps {
   sessions: ChatSession[];
   messages: ChatMessage[];
   isLoading: boolean;
+  liveMessage?: string;
   modelName: string;
   hasActiveModel: boolean;
   onOpenSettings: () => void;
@@ -20,6 +21,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   sessions,
   messages,
   isLoading,
+  liveMessage,
   modelName,
   hasActiveModel,
   onOpenSettings,
@@ -29,7 +31,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   React.useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isLoading]);
+  }, [messages, isLoading, liveMessage]);
 
   // ── empty state: no chats at all ──────────────────────────────────────────
   if (!hasSession && sessions.length === 0) {
@@ -120,7 +122,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         {isLoading && (
           <div className="flex justify-start">
             <div className="rounded-2xl px-4 py-2.5 text-sm bg-muted text-muted-foreground animate-pulse">
-              Thinking…
+              {liveMessage && liveMessage.trim() ? liveMessage : "Thinking…"}
             </div>
           </div>
         )}

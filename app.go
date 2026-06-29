@@ -367,12 +367,24 @@ func (a *App) FsDelete(path string) (string, error) {
 	return a.terminal.FsDelete(a.ctx, a.activeChatID, projectPath, path)
 }
 
-func (a *App) FolderTree(path string, maxDepth int) (string, error) {
-	projectPath, err := a.projectPath()
+// GetDag returns the active chat's stored DAG as JSON (empty string if none) so
+// the frontend can render it.
+func (a *App) GetDag() (string, error) {
+	if a.chat == nil {
+		return "", fmt.Errorf("app not initialized")
+	}
+	if a.activeChatID == "" {
+		return "", nil
+	}
+	g, ok, err := a.chat.GetDag(a.ctx, a.activeChatID)
+	if err != nil || !ok {
+		return "", err
+	}
+	b, err := json.MarshalIndent(g, "", "  ")
 	if err != nil {
 		return "", err
 	}
-	return a.terminal.FolderTree(a.ctx, projectPath, path, maxDepth)
+	return string(b), nil
 }
 
 func (a *App) SetPermission(action, rule string) error {
@@ -400,22 +412,13 @@ func (a *App) ListPermissions() ([]models.Permission, error) {
 func (a *App) buildToolFuncs(chatID, projectPath string) map[string]agent.ToolFunc {
 	return map[string]agent.ToolFunc{
 		"current_time": func(ctx context.Context, args map[string]any) (string, error) {
+			logger.Live(ctx, "Checking the time")
 			tz, _ := args["timezone"].(string)
 			return tools.CurrentTime(ctx, tz)
 		},
-		"folder_tree": func(ctx context.Context, args map[string]any) (string, error) {
-			path, _ := args["path"].(string)
-			depth := 0
-			switch v := args["max_depth"].(type) {
-			case float64:
-				depth = int(v)
-			case int:
-				depth = v
-			}
-			return a.terminal.FolderTree(ctx, projectPath, path, depth)
-		},
 		"execute": func(ctx context.Context, args map[string]any) (string, error) {
 			command, _ := args["command"].(string)
+			logger.Live(ctx, "Running: "+command)
 			return a.terminal.Execute(ctx, chatID, strings.Fields(command), projectPath)
 		},
 		"fs": func(ctx context.Context, args map[string]any) (string, error) {
@@ -426,14 +429,19 @@ func (a *App) buildToolFuncs(chatID, projectPath string) map[string]agent.ToolFu
 			newText, _ := args["new"].(string)
 			switch strings.ToLower(strings.TrimSpace(op)) {
 			case "create":
+				logger.Live(ctx, "Creating "+path)
 				return a.terminal.FsCreate(ctx, chatID, projectPath, path, content)
 			case "read":
+				logger.Live(ctx, "Reading "+path)
 				return a.terminal.FsRead(ctx, chatID, projectPath, path)
 			case "update":
+				logger.Live(ctx, "Updating "+path)
 				return a.terminal.FsUpdate(ctx, chatID, projectPath, path, content)
 			case "replace":
+				logger.Live(ctx, "Editing "+path)
 				return a.terminal.FsReplace(ctx, chatID, projectPath, path, oldText, newText)
 			case "delete":
+				logger.Live(ctx, "Deleting "+path)
 				return a.terminal.FsDelete(ctx, chatID, projectPath, path)
 			default:
 				return "", fmt.Errorf("unknown fs operation %q", op)
@@ -441,6 +449,7 @@ func (a *App) buildToolFuncs(chatID, projectPath string) map[string]agent.ToolFu
 		},
 		"ask_permission": func(ctx context.Context, args map[string]any) (string, error) {
 			action, _ := args["action"].(string)
+			logger.Live(ctx, "Asking permission: "+action)
 			req, err := a.terminal.Ask(ctx, chatID, action)
 			if err != nil {
 				return "", err
@@ -451,13 +460,17 @@ func (a *App) buildToolFuncs(chatID, projectPath string) map[string]agent.ToolFu
 			return "The user denied the action.", nil
 		},
 		"create_dag": func(ctx context.Context, args map[string]any) (string, error) {
-			data, err := dagArgBytes(args["dag"])
+			logger.Live(ctx, "Building the plan")
+			b, err := json.Marshal(args)
 			if err != nil {
-				return "", err
+				return "", fmt.Errorf("invalid dag args: %w", err)
 			}
 			var g models.Dag
-			if err := json.Unmarshal(data, &g); err != nil {
-				return "", fmt.Errorf("invalid dag json: %w", err)
+			if err := json.Unmarshal(b, &g); err != nil {
+				return "", fmt.Errorf("invalid dag: %w", err)
+			}
+			if strings.TrimSpace(g.FailurePolicy) == "" {
+				g.FailurePolicy = "block"
 			}
 			for i := range g.Tasks {
 				if strings.TrimSpace(g.Tasks[i].Status) == "" {
@@ -465,53 +478,51 @@ func (a *App) buildToolFuncs(chatID, projectPath string) map[string]agent.ToolFu
 				}
 			}
 			if err := a.dag.Validates(ctx, g); err != nil {
-				a.logger.Warn("create_dag validation failed", "chat", chatID, "dag", g.ID, "error", err)
+				a.logger.Warn("create_dag invalid", "chat", chatID, "dag", g.ID, "error", err)
 				return "", err
 			}
-			canonical, err := json.MarshalIndent(g, "", "  ")
-			if err != nil {
-				return "", fmt.Errorf("marshal dag: %w", err)
-			}
-			if err := a.chat.SaveDag(ctx, chatID, string(canonical)); err != nil {
-				a.logger.Error("create_dag save failed", "chat", chatID, "dag", g.ID, "error", err)
+			if err := a.chat.SaveDag(ctx, chatID, g); err != nil {
+				a.logger.Error("create_dag save failed", "chat", chatID, "error", err)
 				return "", err
 			}
-			a.logger.Info("create_dag saved", "chat", chatID, "dag", g.ID, "tasks", len(g.Tasks), "bytes", len(canonical))
-			return fmt.Sprintf("DAG validated and saved (%d task(s)).", len(g.Tasks)), nil
+			a.logger.Info("create_dag saved", "chat", chatID, "dag", g.ID, "tasks", len(g.Tasks))
+			return fmt.Sprintf("Plan validated and saved (%d task(s)).", len(g.Tasks)), nil
 		},
 		"get_dag": func(ctx context.Context, args map[string]any) (string, error) {
-			dagJSON, err := a.chat.GetDag(ctx, chatID)
+			logger.Live(ctx, "Reading the plan")
+			g, ok, err := a.chat.GetDag(ctx, chatID)
 			if err != nil {
 				a.logger.Error("get_dag failed", "chat", chatID, "error", err)
 				return "", err
 			}
-			if strings.TrimSpace(dagJSON) == "" {
-				a.logger.Info("get_dag empty", "chat", chatID)
-				return "No DAG has been created for this chat yet.", nil
+			if !ok {
+				return "No plan has been created for this chat yet.", nil
 			}
-			a.logger.Info("get_dag read", "chat", chatID, "bytes", len(dagJSON))
-			return dagJSON, nil
+			out, err := json.MarshalIndent(g, "", "  ")
+			if err != nil {
+				return "", fmt.Errorf("marshal dag: %w", err)
+			}
+			return string(out), nil
 		},
-	}
-}
-
-// dagArgBytes normalizes the "dag" argument, which models emit either as a JSON
-// string or as an already-parsed object, into raw JSON bytes.
-func dagArgBytes(raw any) ([]byte, error) {
-	switch v := raw.(type) {
-	case nil:
-		return nil, fmt.Errorf("dag is required")
-	case string:
-		if strings.TrimSpace(v) == "" {
-			return nil, fmt.Errorf("dag is required")
-		}
-		return []byte(v), nil
-	default:
-		b, err := json.Marshal(v)
-		if err != nil {
-			return nil, fmt.Errorf("invalid dag: %w", err)
-		}
-		return b, nil
+		"delete_dag": func(ctx context.Context, args map[string]any) (string, error) {
+			id, _ := args["id"].(string)
+			id = strings.TrimSpace(id)
+			logger.Live(ctx, "Removing task "+id)
+			if id == "" {
+				return "", fmt.Errorf("task id is required")
+			}
+			if err := a.chat.DeleteTask(ctx, chatID, id); err != nil {
+				return "", err
+			}
+			a.logger.Info("delete_dag", "chat", chatID, "task", id)
+			msg := fmt.Sprintf("Deleted task %q.", id)
+			if g, ok, gerr := a.chat.GetDag(ctx, chatID); gerr == nil && ok {
+				if vErr := a.dag.Validates(ctx, g); vErr != nil {
+					msg += " Note: the plan now has issues; fix with create_dag: " + vErr.Error()
+				}
+			}
+			return msg, nil
+		},
 	}
 }
 

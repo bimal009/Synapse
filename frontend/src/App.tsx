@@ -82,6 +82,7 @@ function App() {
   const [showTrustDialog, setShowTrustDialog] = useState(false);
 
   const [isLoading, setIsLoading] = useState(false);
+  const [liveMessage, setLiveMessage] = useState("");
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [messagesBySession, setMessagesBySession] = useState<
@@ -163,6 +164,14 @@ function App() {
     if (!isWails()) return;
     return EventsOn("ask:permission", (data: { action?: string }) => {
       setPermissionAction(data?.action ?? "");
+    });
+  }, []);
+
+  // ── live activity messages from tool calls ─────────────────────────────────
+  useEffect(() => {
+    if (!isWails()) return;
+    return EventsOn("live-message", (msg: string) => {
+      setLiveMessage(typeof msg === "string" ? msg : "");
     });
   }, []);
 
@@ -374,6 +383,7 @@ function App() {
       }
 
       setIsLoading(true);
+      setLiveMessage("");
       try {
         const reply = await RunAgents(message);
         updateSessionMessages(sessionId, (prev) => [
@@ -396,6 +406,7 @@ function App() {
         ]);
       } finally {
         setIsLoading(false);
+        setLiveMessage("");
       }
     },
     [
@@ -493,6 +504,7 @@ function App() {
             activeSessionId ? (messagesBySession[activeSessionId] ?? []) : []
           }
           isLoading={isLoading}
+          liveMessage={liveMessage}
           modelName={hasActiveModel ? (activeModel?.model ?? "") : ""}
           hasActiveModel={hasActiveModel}
           onOpenSettings={() => setSettingsOpen(true)}

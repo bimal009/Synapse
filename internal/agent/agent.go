@@ -106,8 +106,7 @@ func (a *agent) Chat(ctx context.Context, messages []api.Message) (string, error
 		"tools", len(toolset),
 	)
 
-	seen := make(map[string]string) // tool-call signature -> result, to break loops
-	lastText := ""                  // last real (non-JSON) assistant text, for fallback
+	seen := make(map[string]string) // tool-call signature -> result, to break repeat loops
 
 	for turn := 0; turn < maxToolTurns; turn++ {
 		var (
@@ -138,37 +137,8 @@ func (a *agent) Chat(ctx context.Context, messages []api.Message) (string, error
 			return "", fmt.Errorf("agent chat [turn %d]: %w", turn, err)
 		}
 
-		if raw := strings.TrimSpace(content.String()); raw != "" && !looksLikeToolCallJSON(raw) {
-			lastText = raw
-		}
-
-		// qwen2.5-coder emits tool calls as plain JSON text even with stream:false,
-		// sometimes several concatenated in one message. Parse all of them inline
-		// if no structured tool calls came back.
 		if len(toolCalls) == 0 {
-			for _, tc := range parseInlineToolCalls(content.String()) {
-				if _, known := a.toolFuncs[tc.Function.Name]; known {
-					toolCalls = append(toolCalls, tc)
-				}
-			}
-			if len(toolCalls) > 0 {
-				// Content was just the raw JSON calls, not a real reply.
-				content.Reset()
-			}
-		}
-
-		if len(toolCalls) == 0 {
-			text := strings.TrimSpace(content.String())
-			// Don't leak a malformed/unknown tool-call JSON to the user. Nudge the
-			// model to answer in plain text and try again.
-			if looksLikeToolCallJSON(text) {
-				messages = append(messages,
-					api.Message{Role: "assistant", Content: text},
-					api.Message{Role: "user", Content: "That was not a valid tool call. Using the results you already have, answer my question directly in plain text — do not output JSON or call more tools."},
-				)
-				continue
-			}
-			return text, nil
+			return strings.TrimSpace(content.String()), nil
 		}
 
 		messages = append(messages, api.Message{
@@ -203,71 +173,5 @@ func (a *agent) Chat(ctx context.Context, messages []api.Message) (string, error
 		}
 	}
 
-	if lastText != "" {
-		return lastText, nil
-	}
 	return "", fmt.Errorf("tool loop exceeded %d turns", maxToolTurns)
-}
-
-func looksLikeToolCallJSON(s string) bool {
-	s = strings.TrimSpace(s)
-	if i := strings.Index(s, "```"); i != -1 {
-		s = strings.TrimSpace(s[i+3:])
-		s = strings.TrimPrefix(s, "json")
-		s = strings.TrimSpace(s)
-	}
-	if !strings.HasPrefix(s, "{") {
-		return false
-	}
-	return strings.Contains(s, `"name"`) && strings.Contains(s, `"arguments"`)
-}
-
-// parseInlineToolCalls extracts every JSON tool-call object the model emitted as
-// plain text. Weak models sometimes concatenate several objects in one message
-// (e.g. two `fs` reads back to back), so we decode them one after another rather
-// than grabbing the span from the first "{" to the last "}".
-func parseInlineToolCalls(content string) []api.ToolCall {
-	s := strings.TrimSpace(content)
-	// Strip a markdown fence if present.
-	if i := strings.Index(s, "```"); i != -1 {
-		s = s[i+3:]
-		s = strings.TrimPrefix(s, "json")
-		if j := strings.LastIndex(s, "```"); j != -1 {
-			s = s[:j]
-		}
-	}
-	start := strings.Index(s, "{")
-	if start < 0 {
-		return nil
-	}
-
-	dec := json.NewDecoder(strings.NewReader(s[start:]))
-	var calls []api.ToolCall
-	for {
-		var tc struct {
-			Name      string         `json:"name"`
-			Arguments map[string]any `json:"arguments"`
-		}
-		if err := dec.Decode(&tc); err != nil {
-			break
-		}
-		if tc.Name == "" {
-			continue
-		}
-		calls = append(calls, api.ToolCall{
-			Function: api.ToolCallFunction{
-				Name:      tc.Name,
-				Arguments: mustMarshalArgs(tc.Arguments),
-			},
-		})
-	}
-	return calls
-}
-
-func mustMarshalArgs(args map[string]any) api.ToolCallFunctionArguments {
-	var out api.ToolCallFunctionArguments
-	if b, err := json.Marshal(args); err == nil {
-		_ = json.Unmarshal(b, &out)
-	}
-	return out
 }

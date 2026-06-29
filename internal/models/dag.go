@@ -16,6 +16,20 @@ type TaskState struct {
 	UpdatedAt string `json:"updated_at" db:"updated_at"`
 }
 
+// TaskRun maps to the task_runs table — one row per execution of a task.
+type TaskRun struct {
+	ID        string `json:"id"         db:"id"`
+	ConvoID   string `json:"convo_id"   db:"convo_id"`
+	SessionID string `json:"session_id" db:"session_id"`
+	TaskID    string `json:"task_id"    db:"task_id"`
+	AgentRole string `json:"agent_role" db:"agent_role"`
+	Status    string `json:"status"     db:"status"`
+	Summary   string `json:"summary"    db:"summary"`
+	Error     string `json:"error"      db:"error"`
+	Priority  int    `json:"priority"   db:"priority"`
+	CreatedAt string `json:"created_at" db:"created_at"`
+}
+
 type Dag struct {
 	ID            string `json:"id"             validate:"required"`
 	Objective     string `json:"objective"      validate:"required"`
@@ -26,7 +40,7 @@ type Dag struct {
 type Task struct {
 	ID           string       `json:"id"           validate:"required"`
 	Title        string       `json:"title"        validate:"required"`
-	Description  string       `json:"description"  validate:"required"`
+	Description  string       `json:"description,omitempty"`
 	Objective    string       `json:"objective"`
 	Inputs       []string     `json:"inputs,omitempty"`
 	Outputs      []string     `json:"outputs,omitempty"`
