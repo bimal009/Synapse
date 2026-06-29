@@ -21,7 +21,10 @@
     /* Linting */
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "erasableSyntaxOnly": true,
+    // Disabled: the Wails-generated bindings (wailsjs/go/models.ts) use TS
+    // namespaces, which erasableSyntaxOnly forbids. That file is regenerated on
+    // every build, so it can't be edited to comply.
+    "erasableSyntaxOnly": false,
     "noFallthroughCasesInSwitch": true
   },
   "include": ["src"]

@@ -2,6 +2,10 @@ APP=synapse
 CMD=./
 BIN=./bin
 
+# Go packages we own — excludes frontend/node_modules, which contains a stray
+# third-party Go package that `./...` would otherwise pick up.
+PKGS=. ./configs/... ./internal/... ./tests/...
+
 .PHONY: run build test fmt vet tidy clean
 
 build:
@@ -11,13 +15,13 @@ run: build
 	$(BIN)/$(APP)
 
 test:
-	go test ./... -v
+	go test $(PKGS) -v
 
 fmt:
-	go fmt ./...
+	go fmt $(PKGS)
 
 vet:
-	go vet ./...
+	go vet $(PKGS)
 
 tidy:
 	go mod tidy

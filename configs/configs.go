@@ -6,7 +6,7 @@ type ModelConfig struct {
 	URL       string
 	APIKey    string
 	Streaming bool
-	Thinking  string
+	Thinking  bool
 }
 type Config struct {
 	Env    string

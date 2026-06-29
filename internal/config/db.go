@@ -67,43 +67,142 @@ func (d *databaseInitilization) Init() error {
 
 func (d *databaseInitilization) migrate() error {
 	_, err := d.db.Exec(`
-		CREATE TABLE IF NOT EXISTS projects (
-			id          TEXT PRIMARY KEY,
-			name        TEXT NOT NULL,
-			path        TEXT NOT NULL UNIQUE,
-			trusted     BOOLEAN DEFAULT FALSE,
-			created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-			last_opened DATETIME
+		CREATE TABLE IF NOT EXISTS chats (
+			id           TEXT PRIMARY KEY,
+			title        TEXT,
+			project_path TEXT,              -- NULL if no project attached
+			created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+			last_opened  DATETIME
+		);
+
+		CREATE TABLE IF NOT EXISTS chat_messages (
+			id         TEXT PRIMARY KEY,
+			chat_id    TEXT NOT NULL,
+			role       TEXT NOT NULL,       -- "user" | "assistant"
+			content    TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (chat_id) REFERENCES chats(id)
 		);
 
 		CREATE TABLE IF NOT EXISTS sessions (
-			id          TEXT PRIMARY KEY,
-			project_id  TEXT NOT NULL,
-			goal        TEXT,
-			dag         TEXT,
-			status      TEXT,
-			created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (project_id) REFERENCES projects(id)
+			id         TEXT PRIMARY KEY,
+			convo_id   TEXT NOT NULL,
+			goal       TEXT,
+			dag        TEXT,
+			status     TEXT,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (convo_id) REFERENCES chats(id)
 		);
 
 		CREATE TABLE IF NOT EXISTS task_runs (
-			id          TEXT PRIMARY KEY,
-			project_id  TEXT NOT NULL,
-			session_id  TEXT NOT NULL,
-			task_id     TEXT NOT NULL,
-			agent_role  TEXT,
-			status      TEXT,
-			summary     TEXT,
-			error       TEXT,
-			created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (project_id) REFERENCES projects(id),
+			id         TEXT PRIMARY KEY,
+			convo_id   TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			task_id    TEXT NOT NULL,
+			agent_role TEXT,
+			status     TEXT,
+			summary    TEXT,
+			error      TEXT,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (convo_id)   REFERENCES chats(id),
 			FOREIGN KEY (session_id) REFERENCES sessions(id)
+		);
+
+		CREATE TABLE IF NOT EXISTS models (
+			id         TEXT PRIMARY KEY,
+			name       TEXT NOT NULL,       -- user label e.g. "My Qwen Coder"
+			role       TEXT NOT NULL,       -- "planner" | "coder" | "default" etc
+			model      TEXT NOT NULL,       -- "qwen2.5:3b"
+			url        TEXT NOT NULL,
+			api_key    TEXT,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS convo_models (
+			convo_id   TEXT NOT NULL,
+			role       TEXT NOT NULL,
+			model_id   TEXT NOT NULL,
+			PRIMARY KEY (convo_id, role),
+			FOREIGN KEY (convo_id)  REFERENCES chats(id),
+			FOREIGN KEY (model_id)  REFERENCES models(id)
+		);
+
+		CREATE TABLE IF NOT EXISTS permissions (
+			id         TEXT PRIMARY KEY,
+			convo_id   TEXT NOT NULL,
+			action     TEXT NOT NULL,
+			rule       TEXT NOT NULL CHECK(rule IN ('allow', 'ask', 'deny', 'always')),
+			config     TEXT,                -- JSON metadata: {"reason": "...", "expires_at": null}
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(convo_id, action),
+			FOREIGN KEY (convo_id) REFERENCES chats(id)
+		);
+
+		CREATE TABLE IF NOT EXISTS permission_events (
+			id         TEXT PRIMARY KEY,
+			convo_id   TEXT NOT NULL,
+			action     TEXT NOT NULL,
+			decision   TEXT NOT NULL CHECK(decision IN ('allowed', 'denied', 'asked:allowed', 'asked:denied')),
+			source     TEXT CHECK(source IN ('rule', 'user', 'default')),
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (convo_id) REFERENCES chats(id)
 		);
 	`)
 	if err != nil {
 		return fmt.Errorf("migration failed: %w", err)
 	}
+
+	if err := d.migrateChatsSchema(); err != nil {
+		return fmt.Errorf("chats migration failed: %w", err)
+	}
+
 	return nil
+}
+func (d *databaseInitilization) migrateChatsSchema() error {
+	if d.hasColumn("chats", "project_path") {
+		return nil
+	}
+
+	_, err := d.db.Exec(`
+		CREATE TABLE chats_new (
+			id           TEXT PRIMARY KEY,
+			title        TEXT,
+			project_path TEXT,
+			created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+			last_opened  DATETIME
+		);
+
+		INSERT INTO chats_new (id, title, project_path, created_at, last_opened)
+			SELECT c.id, c.title, p.path, c.created_at, c.created_at
+			FROM chats c
+			LEFT JOIN projects p ON p.id = c.project_id;
+
+		DROP TABLE chats;
+		ALTER TABLE chats_new RENAME TO chats;
+	`)
+	return err
+}
+
+func (d *databaseInitilization) hasColumn(table, col string) bool {
+	rows, err := d.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid, notnull, pk int
+			name, ctype      string
+			dflt             sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false
+		}
+		if name == col {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *databaseInitilization) DB() *sql.DB {
