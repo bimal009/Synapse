@@ -34,6 +34,28 @@ const PRESET_URLS = [
   { label: "Custom", value: "" },
 ];
 
+// Must match the seeded roles in the backend (internal/models.AllRoles()).
+const ROLES = [
+  { value: "planner", label: "Planner", desc: "Decompose objectives, build the DAG" },
+  { value: "reasoning", label: "Reasoning", desc: "Complex multi-step analysis" },
+  { value: "coder", label: "Coder", desc: "Write and edit code" },
+  { value: "tester", label: "Tester", desc: "Write and run tests" },
+  { value: "qa", label: "QA", desc: "Verify correctness and quality" },
+  { value: "analyst", label: "Analyst", desc: "Analyze data, synthesize findings" },
+  { value: "reviewer", label: "Reviewer", desc: "Review code and designs" },
+  { value: "researcher", label: "Researcher", desc: "Gather and synthesize info" },
+  { value: "vision", label: "Vision", desc: "Understand images and visuals" },
+  { value: "architect", label: "Architect", desc: "System and software design" },
+  { value: "designer", label: "Designer", desc: "UI/UX and visual design" },
+  { value: "devops", label: "DevOps", desc: "Infrastructure, CI/CD, deployment" },
+  { value: "security", label: "Security", desc: "Review and threat analysis" },
+  { value: "writer", label: "Writer", desc: "Documentation and content" },
+  { value: "editor", label: "Editor", desc: "Proofread and refine text" },
+  { value: "data", label: "Data", desc: "Data engineering and pipelines" },
+  { value: "summarizer", label: "Summarizer", desc: "Condense long content" },
+  { value: "general", label: "General", desc: "General-purpose default" },
+];
+
 const DEFAULT_MODEL: ModelConfig = {
   id: "",
   name: "",
@@ -105,20 +127,29 @@ const ModelCard: React.FC<{
             />
           </div>
 
-          {/* Role — a single role only (no commas / spaces) */}
+          {/* Role — one of the fixed, seeded roles */}
           <div className="space-y-1.5">
             <Label className="text-xs text-muted-foreground">Role</Label>
-            <Input
+            <Select
               value={model.role}
-              onChange={(e) =>
-                onChange({
-                  ...model,
-                  role: e.target.value.replace(/[,\s]/g, ""),
-                })
-              }
-              placeholder="e.g. planner"
-              className="h-8 text-xs"
-            />
+              onValueChange={(v) => onChange({ ...model, role: v })}
+            >
+              <SelectTrigger className="h-8 text-xs">
+                <SelectValue placeholder="Select a role" />
+              </SelectTrigger>
+              <SelectContent>
+                {ROLES.map((r) => (
+                  <SelectItem
+                    key={r.value}
+                    value={r.value}
+                    description={r.desc}
+                    className="text-xs"
+                  >
+                    {r.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
 
           {/* Model identifier */}

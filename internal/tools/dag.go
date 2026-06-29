@@ -2,9 +2,7 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/bimal009/Synapse/internal/models"
@@ -17,8 +15,6 @@ type dag struct {
 
 type Dag interface {
 	Validates(ctx context.Context, dag models.Dag) error
-	CreateJson(ctx context.Context, dag models.Dag, filePath string) (string, error)
-	LoadJson(ctx context.Context, filePath string) (models.Dag, error)
 }
 
 func NewDag() Dag {
@@ -97,44 +93,6 @@ func (d *dag) Validates(ctx context.Context, dag models.Dag) error {
 	}
 
 	return nil
-}
-
-func (d *dag) CreateJson(ctx context.Context, dag models.Dag, filePath string) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	data, err := json.MarshalIndent(dag, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("marshal dag: %w", err)
-	}
-	tmp := filePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return "", fmt.Errorf("write %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, filePath); err != nil {
-		return "", fmt.Errorf("rename %s: %w", filePath, err)
-	}
-
-	if _, err := d.LoadJson(ctx, filePath); err != nil {
-		return "", fmt.Errorf("post-write validation failed for %s: %w", filePath, err)
-	}
-
-	return filePath, nil
-}
-
-func (d *dag) LoadJson(ctx context.Context, filePath string) (models.Dag, error) {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return models.Dag{}, fmt.Errorf("read %s: %w", filePath, err)
-	}
-	var g models.Dag
-	if err := json.Unmarshal(data, &g); err != nil {
-		return models.Dag{}, fmt.Errorf("parse dag.json: %w", err)
-	}
-	if err := d.Validates(ctx, g); err != nil {
-		return models.Dag{}, fmt.Errorf("invalid dag: %w", err)
-	}
-	return g, nil
 }
 
 func topoSort(tasks []models.Task) ([]string, error) {

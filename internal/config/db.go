@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/bimal009/Synapse/internal/models"
 	_ "modernc.org/sqlite"
 )
 
@@ -147,6 +148,19 @@ func (d *databaseInitilization) migrate() error {
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (convo_id) REFERENCES chats(id)
 		);
+
+		CREATE TABLE IF NOT EXISTS roles (
+			name        TEXT PRIMARY KEY,
+			description TEXT,
+			created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS dags (
+			convo_id   TEXT PRIMARY KEY,    -- one current DAG per chat
+			dag        TEXT NOT NULL,       -- the validated DAG as JSON
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (convo_id) REFERENCES chats(id)
+		);
 	`)
 	if err != nil {
 		return fmt.Errorf("migration failed: %w", err)
@@ -156,6 +170,22 @@ func (d *databaseInitilization) migrate() error {
 		return fmt.Errorf("chats migration failed: %w", err)
 	}
 
+	if err := d.seedRoles(); err != nil {
+		return fmt.Errorf("seed roles failed: %w", err)
+	}
+
+	return nil
+}
+
+func (d *databaseInitilization) seedRoles() error {
+	for _, role := range models.AllRoles() {
+		if _, err := d.db.Exec(
+			`INSERT OR IGNORE INTO roles (name, description) VALUES (?, ?)`,
+			role, models.RoleDescriptions[role],
+		); err != nil {
+			return fmt.Errorf("seed role %q: %w", role, err)
+		}
+	}
 	return nil
 }
 func (d *databaseInitilization) migrateChatsSchema() error {

@@ -38,5 +38,5 @@ type Task struct {
 	Priority     int          `json:"priority,omitempty"`
 	Tags         []string     `json:"tags,omitempty"`
 	Owner        string       `json:"owner,omitempty"`
-	ModelRole    string       `json:"model_role,omitempty" validate:"omitempty,oneof=fast coding reasoning planning"`
+	ModelRole    string       `json:"model_role,omitempty" validate:"omitempty,oneof=planner reasoning coder tester qa analyst reviewer researcher vision architect designer devops security writer editor data summarizer general"`
 }

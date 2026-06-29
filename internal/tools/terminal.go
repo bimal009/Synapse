@@ -41,6 +41,7 @@ type Terminal interface {
 	FsUpdate(ctx context.Context, chatID, projectPath, path, content string) (string, error)
 	FsReplace(ctx context.Context, chatID, projectPath, path, oldText, newText string) (string, error)
 	FsDelete(ctx context.Context, chatID, projectPath, path string) (string, error)
+	FolderTree(ctx context.Context, projectPath, subPath string, maxDepth int) (string, error)
 }
 
 type terminal struct {
@@ -334,16 +335,142 @@ func (t *terminal) FsDelete(ctx context.Context, chatID, projectPath, path strin
 	return fmt.Sprintf("Deleted %s.", path), nil
 }
 
+func (t *terminal) FolderTree(ctx context.Context, projectPath, subPath string, maxDepth int) (string, error) {
+	if projectPath == "" {
+		return "", fmt.Errorf("no project attached to this chat")
+	}
+	root, err := filepath.Abs(projectPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid project path: %w", err)
+	}
+	start := root
+	if strings.TrimSpace(subPath) != "" {
+		start, err = resolveInProject(projectPath, subPath)
+		if err != nil {
+			return "", err
+		}
+	}
+	if maxDepth <= 0 {
+		maxDepth = 4
+	}
+
+	info, err := os.Stat(start)
+	if err != nil {
+		return "", suggestNotFound(projectPath, subPath, "list")
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("%q is a file, not a directory", subPath)
+	}
+
+	rel, _ := filepath.Rel(root, start)
+	var b strings.Builder
+	b.WriteString(filepath.ToSlash(rel) + "/\n")
+
+	count := 0
+	const maxEntries = 2000
+
+	var walk func(dir string, depth int)
+	walk = func(dir string, depth int) {
+		if depth >= maxDepth || count >= maxEntries {
+			return
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i].IsDir() != entries[j].IsDir() {
+				return entries[i].IsDir()
+			}
+			return entries[i].Name() < entries[j].Name()
+		})
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() {
+				switch strings.ToLower(name) {
+				case ".git", "node_modules", "dist", "build", "vendor", ".next":
+					continue
+				}
+			}
+			count++
+			if count > maxEntries {
+				b.WriteString(strings.Repeat("  ", depth+1) + "... (truncated)\n")
+				return
+			}
+			indent := strings.Repeat("  ", depth+1)
+			if e.IsDir() {
+				b.WriteString(indent + name + "/\n")
+				walk(filepath.Join(dir, name), depth+1)
+			} else {
+				b.WriteString(indent + name + "\n")
+			}
+		}
+	}
+	walk(start, 0)
+
+	return b.String(), nil
+}
+
 func suggestNotFound(projectPath, path, verb string) error {
 	root, err := filepath.Abs(projectPath)
 	if err != nil {
 		return fmt.Errorf("cannot %s %q: not found", verb, path)
 	}
-	matches := findSimilar(root, path)
-	if len(matches) == 0 {
-		return fmt.Errorf("cannot %s %q: not found. Explore the project first with execute (e.g. \"dir /s /b\" or \"findstr /s /i\") to find the correct path, then retry with an exact path", verb, path)
+
+	msg := fmt.Sprintf("cannot %s %q: not found.", verb, path)
+	if listing := nearestDirListing(root, path); listing != "" {
+		msg += "\n" + listing
 	}
-	return fmt.Errorf("cannot %s %q: not found. Closest existing paths:\n  %s\nRetry with one of these exact paths", verb, path, strings.Join(matches, "\n  "))
+	if matches := findSimilar(root, path); len(matches) > 0 {
+		msg += "\nClosest existing paths:\n  " + strings.Join(matches, "\n  ")
+	}
+	msg += "\nRetry with an exact path from the listing above."
+	return fmt.Errorf("%s", msg)
+}
+
+// nearestDirListing finds the deepest existing ancestor directory of the
+// requested path (inside the project) and lists its immediate entries, so the
+// model can see what is actually there instead of guessing.
+func nearestDirListing(root, path string) string {
+	abs := path
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(root, abs)
+	}
+	abs = filepath.Clean(abs)
+
+	dir := filepath.Dir(abs)
+	for {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return ""
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() {
+			name += "/"
+		}
+		names = append(names, name)
+		if len(names) >= 50 {
+			break
+		}
+	}
+	return fmt.Sprintf("%q exists and contains: %s", filepath.ToSlash(rel), strings.Join(names, ", "))
 }
 
 func findSimilar(root, query string) []string {

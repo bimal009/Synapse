@@ -4,11 +4,37 @@ import "github.com/ollama/ollama/api"
 
 func DefaultTools() []api.Tool {
 	return []api.Tool{
+		folderTreeTool(),
 		executeTool(),
 		fsTool(),
 		askTool(),
 		dagTool(),
+		getDagTool(),
 		currentTimeTool(),
+	}
+}
+
+func folderTreeTool() api.Tool {
+	props := api.NewToolPropertiesMap()
+	props.Set("path", api.ToolProperty{
+		Type:        api.PropertyType{"string"},
+		Description: `Optional subdirectory to list, relative to the project root (e.g. ".synapse/skills"). Omit to list from the project root.`,
+	})
+	props.Set("max_depth", api.ToolProperty{
+		Type:        api.PropertyType{"integer"},
+		Description: "Optional maximum depth to descend. Defaults to 4.",
+	})
+
+	return api.Tool{
+		Type: "function",
+		Function: api.ToolFunction{
+			Name:        "folder_tree",
+			Description: "List the project's folder tree (directories and files) so you can see exactly what exists. Call this FIRST, before reading or writing any file, to discover real paths instead of guessing.",
+			Parameters: api.ToolFunctionParameters{
+				Type:       "object",
+				Properties: props,
+			},
+		},
 	}
 }
 
@@ -118,23 +144,37 @@ func dagTool() api.Tool {
 	props := api.NewToolPropertiesMap()
 	props.Set("dag", api.ToolProperty{
 		Type: api.PropertyType{"string"},
-		Description: `The execution plan as a JSON object: ` +
+		Description: `The full execution plan as a JSON object: ` +
 			`{"id","objective","failure_policy":"block|skip|recover",` +
 			`"tasks":[{"id","title","description","dependencies":[...],` +
-			`"inputs":[...],"outputs":[...],"status":"pending"}]}. ` +
-			`Task ids must be unique, dependencies must reference existing tasks, ` +
-			`and the graph must be acyclic.`,
+			`"inputs":[...],"outputs":[...],"model_role":"...","status":"pending"}]}. ` +
+			`Provide the entire plan in one call. Task ids must be unique, ` +
+			`dependencies must reference existing tasks, and the graph must be acyclic.`,
 	})
 
 	return api.Tool{
 		Type: "function",
 		Function: api.ToolFunction{
 			Name:        "create_dag",
-			Description: "Validate a task DAG (unique ids, resolvable dependencies, no cycles, consistent inputs/outputs) and persist it to .synapse/dag.json.",
+			Description: "Validate the full task DAG and save it to the database for this chat. If validation fails, the error explains what to fix — correct the plan and call create_dag again. Overwrites any existing DAG for the chat.",
 			Parameters: api.ToolFunctionParameters{
 				Type:       "object",
 				Required:   []string{"dag"},
 				Properties: props,
+			},
+		},
+	}
+}
+
+func getDagTool() api.Tool {
+	return api.Tool{
+		Type: "function",
+		Function: api.ToolFunction{
+			Name:        "get_dag",
+			Description: "Read the current task DAG for this chat from the database and return it as JSON. Takes no arguments. Use this instead of reading any file to see the plan.",
+			Parameters: api.ToolFunctionParameters{
+				Type:       "object",
+				Properties: api.NewToolPropertiesMap(),
 			},
 		},
 	}

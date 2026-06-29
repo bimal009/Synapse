@@ -17,7 +17,11 @@ import (
 
 type ToolFunc func(ctx context.Context, args map[string]any) (string, error)
 
-const maxToolTurns = 10
+const maxToolTurns = 15
+
+// Ollama defaults num_ctx to ~4k, which truncates a large create_dag argument
+// (e.g. a multi-task DAG) mid-generation. Give the model a roomy window.
+const numCtx = 16384
 
 type Agent interface {
 	Chat(ctx context.Context, messages []api.Message) (string, error)
@@ -63,7 +67,7 @@ func New(cfg configs.Config, role string, logger *slog.Logger, toolFuncs map[str
 	})
 
 	return &agent{
-		model:     modelCfg.Model,
+		model:     strings.TrimSpace(modelCfg.Model),
 		role:      role,
 		client:    client,
 		logger:    logger,
@@ -116,6 +120,7 @@ func (a *agent) Chat(ctx context.Context, messages []api.Message) (string, error
 			Messages: messages,
 			Stream:   &stream,
 			Tools:    toolset,
+			Options:  map[string]any{"num_ctx": numCtx},
 		}, func(resp api.ChatResponse) error {
 			content.WriteString(resp.Message.Content)
 			toolCalls = append(toolCalls, resp.Message.ToolCalls...)
@@ -137,21 +142,18 @@ func (a *agent) Chat(ctx context.Context, messages []api.Message) (string, error
 			lastText = raw
 		}
 
-		// qwen2.5-coder emits tool calls as plain JSON text even with stream:false.
-		// Parse inline if no structured tool calls came back.
+		// qwen2.5-coder emits tool calls as plain JSON text even with stream:false,
+		// sometimes several concatenated in one message. Parse all of them inline
+		// if no structured tool calls came back.
 		if len(toolCalls) == 0 {
-			if name, args, ok := parseInlineToolCall(content.String()); ok {
-				if _, known := a.toolFuncs[name]; known {
-					// Re-add as a proper ToolCall so the loop handles it uniformly.
-					toolCalls = append(toolCalls, api.ToolCall{
-						Function: api.ToolCallFunction{
-							Name:      name,
-							Arguments: mustMarshalArgs(args),
-						},
-					})
-					// Clear content — it was just the raw JSON, not a real reply.
-					content.Reset()
+			for _, tc := range parseInlineToolCalls(content.String()) {
+				if _, known := a.toolFuncs[tc.Function.Name]; known {
+					toolCalls = append(toolCalls, tc)
 				}
+			}
+			if len(toolCalls) > 0 {
+				// Content was just the raw JSON calls, not a real reply.
+				content.Reset()
 			}
 		}
 
@@ -220,9 +222,13 @@ func looksLikeToolCallJSON(s string) bool {
 	return strings.Contains(s, `"name"`) && strings.Contains(s, `"arguments"`)
 }
 
-func parseInlineToolCall(content string) (string, map[string]any, bool) {
+// parseInlineToolCalls extracts every JSON tool-call object the model emitted as
+// plain text. Weak models sometimes concatenate several objects in one message
+// (e.g. two `fs` reads back to back), so we decode them one after another rather
+// than grabbing the span from the first "{" to the last "}".
+func parseInlineToolCalls(content string) []api.ToolCall {
 	s := strings.TrimSpace(content)
-	// Strip markdown fences if present.
+	// Strip a markdown fence if present.
 	if i := strings.Index(s, "```"); i != -1 {
 		s = s[i+3:]
 		s = strings.TrimPrefix(s, "json")
@@ -231,18 +237,31 @@ func parseInlineToolCall(content string) (string, map[string]any, bool) {
 		}
 	}
 	start := strings.Index(s, "{")
-	end := strings.LastIndex(s, "}")
-	if start < 0 || end <= start {
-		return "", nil, false
+	if start < 0 {
+		return nil
 	}
-	var tc struct {
-		Name      string         `json:"name"`
-		Arguments map[string]any `json:"arguments"`
+
+	dec := json.NewDecoder(strings.NewReader(s[start:]))
+	var calls []api.ToolCall
+	for {
+		var tc struct {
+			Name      string         `json:"name"`
+			Arguments map[string]any `json:"arguments"`
+		}
+		if err := dec.Decode(&tc); err != nil {
+			break
+		}
+		if tc.Name == "" {
+			continue
+		}
+		calls = append(calls, api.ToolCall{
+			Function: api.ToolCallFunction{
+				Name:      tc.Name,
+				Arguments: mustMarshalArgs(tc.Arguments),
+			},
+		})
 	}
-	if err := json.Unmarshal([]byte(s[start:end+1]), &tc); err != nil || tc.Name == "" {
-		return "", nil, false
-	}
-	return tc.Name, tc.Arguments, true
+	return calls
 }
 
 func mustMarshalArgs(args map[string]any) api.ToolCallFunctionArguments {

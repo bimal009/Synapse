@@ -7,9 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	goruntime "runtime"
+	"sort"
 	"strings"
 	"sync"
 
@@ -233,6 +232,13 @@ func (a *App) DeleteModel(modelID string) error {
 	return a.chat.DeleteModel(a.ctx, modelID)
 }
 
+func (a *App) ListRoles() ([]models.Role, error) {
+	if a.chat == nil {
+		return nil, fmt.Errorf("app not initialized")
+	}
+	return a.chat.ListRoles(a.ctx)
+}
+
 func (a *App) SetActiveModel(role string, modelID string) error {
 	if a.chat == nil {
 		return fmt.Errorf("app not initialized")
@@ -361,6 +367,14 @@ func (a *App) FsDelete(path string) (string, error) {
 	return a.terminal.FsDelete(a.ctx, a.activeChatID, projectPath, path)
 }
 
+func (a *App) FolderTree(path string, maxDepth int) (string, error) {
+	projectPath, err := a.projectPath()
+	if err != nil {
+		return "", err
+	}
+	return a.terminal.FolderTree(a.ctx, projectPath, path, maxDepth)
+}
+
 func (a *App) SetPermission(action, rule string) error {
 	if a.chat == nil {
 		return fmt.Errorf("app not initialized")
@@ -383,15 +397,22 @@ func (a *App) ListPermissions() ([]models.Permission, error) {
 
 // ── Agent ─────────────────────────────────────────────────────────────────────
 
-func (a *App) Greet(name string) string {
-	return "Hello " + name + ", Synapse is ready!"
-}
-
 func (a *App) buildToolFuncs(chatID, projectPath string) map[string]agent.ToolFunc {
 	return map[string]agent.ToolFunc{
 		"current_time": func(ctx context.Context, args map[string]any) (string, error) {
 			tz, _ := args["timezone"].(string)
 			return tools.CurrentTime(ctx, tz)
+		},
+		"folder_tree": func(ctx context.Context, args map[string]any) (string, error) {
+			path, _ := args["path"].(string)
+			depth := 0
+			switch v := args["max_depth"].(type) {
+			case float64:
+				depth = int(v)
+			case int:
+				depth = v
+			}
+			return a.terminal.FolderTree(ctx, projectPath, path, depth)
 		},
 		"execute": func(ctx context.Context, args map[string]any) (string, error) {
 			command, _ := args["command"].(string)
@@ -438,33 +459,44 @@ func (a *App) buildToolFuncs(chatID, projectPath string) map[string]agent.ToolFu
 			if err := json.Unmarshal(data, &g); err != nil {
 				return "", fmt.Errorf("invalid dag json: %w", err)
 			}
-			// Default missing task statuses so validation can focus on structure.
 			for i := range g.Tasks {
 				if strings.TrimSpace(g.Tasks[i].Status) == "" {
 					g.Tasks[i].Status = "pending"
 				}
 			}
 			if err := a.dag.Validates(ctx, g); err != nil {
+				a.logger.Warn("create_dag validation failed", "chat", chatID, "dag", g.ID, "error", err)
 				return "", err
 			}
-			if projectPath == "" {
-				return "", fmt.Errorf("no project attached to this chat")
-			}
-			dir := filepath.Join(projectPath, ".synapse", "dag")
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return "", fmt.Errorf("create .synapse/dag dir: %w", err)
-			}
-			path, err := a.dag.CreateJson(ctx, g, filepath.Join(dir, "dag.json"))
+			canonical, err := json.MarshalIndent(g, "", "  ")
 			if err != nil {
+				return "", fmt.Errorf("marshal dag: %w", err)
+			}
+			if err := a.chat.SaveDag(ctx, chatID, string(canonical)); err != nil {
+				a.logger.Error("create_dag save failed", "chat", chatID, "dag", g.ID, "error", err)
 				return "", err
 			}
-			return fmt.Sprintf("DAG validated and saved to %s (%d tasks).", path, len(g.Tasks)), nil
+			a.logger.Info("create_dag saved", "chat", chatID, "dag", g.ID, "tasks", len(g.Tasks), "bytes", len(canonical))
+			return fmt.Sprintf("DAG validated and saved (%d task(s)).", len(g.Tasks)), nil
+		},
+		"get_dag": func(ctx context.Context, args map[string]any) (string, error) {
+			dagJSON, err := a.chat.GetDag(ctx, chatID)
+			if err != nil {
+				a.logger.Error("get_dag failed", "chat", chatID, "error", err)
+				return "", err
+			}
+			if strings.TrimSpace(dagJSON) == "" {
+				a.logger.Info("get_dag empty", "chat", chatID)
+				return "No DAG has been created for this chat yet.", nil
+			}
+			a.logger.Info("get_dag read", "chat", chatID, "bytes", len(dagJSON))
+			return dagJSON, nil
 		},
 	}
 }
 
-// dagArgBytes normalizes the "dag" tool argument, which models may emit either
-// as a JSON string or as an already-parsed object, into raw JSON bytes.
+// dagArgBytes normalizes the "dag" argument, which models emit either as a JSON
+// string or as an already-parsed object, into raw JSON bytes.
 func dagArgBytes(raw any) ([]byte, error) {
 	switch v := raw.(type) {
 	case nil:
@@ -483,6 +515,28 @@ func dagArgBytes(raw any) ([]byte, error) {
 	}
 }
 
+// availableModelsPrompt tells the planner which agent roles are actually
+// configured for this chat, so it only assigns tasks to roles that exist and
+// uses the exact hardcoded role names.
+func (a *App) availableModelsPrompt() string {
+	if len(a.cfg.Models) == 0 {
+		return ""
+	}
+	roles := make([]string, 0, len(a.cfg.Models))
+	for role := range a.cfg.Models {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+
+	var b strings.Builder
+	b.WriteString("## Available agent roles for this chat\n\n")
+	b.WriteString("Only these roles are configured. When you set a task's `model_role`, use one of these exact role names — never invent a role or name a concrete model:\n\n")
+	for _, role := range roles {
+		fmt.Fprintf(&b, "- `%s` (model: %s)\n", role, a.cfg.Models[role].Model)
+	}
+	return b.String()
+}
+
 func (a *App) RunAgents(prompt string) (string, error) {
 	if a.activeChatID == "" {
 		return "", fmt.Errorf("no active chat")
@@ -498,9 +552,12 @@ func (a *App) RunAgents(prompt string) (string, error) {
 		return "", fmt.Errorf("no models configured")
 	}
 
-	messages := make([]api.Message, 0, 2)
+	messages := make([]api.Message, 0, 3)
 	if sp := strings.TrimSpace(a.builtPrompt); sp != "" {
 		messages = append(messages, api.Message{Role: "system", Content: sp})
+	}
+	if avail := a.availableModelsPrompt(); avail != "" {
+		messages = append(messages, api.Message{Role: "system", Content: avail})
 	}
 	messages = append(messages, api.Message{Role: "user", Content: prompt})
 

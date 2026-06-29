@@ -39,8 +39,11 @@ type Chat interface {
 	ActiveModels(ctx context.Context, chatID string) ([]models.Model, error)
 	ListModels(ctx context.Context) ([]models.Model, error)
 	DeleteModel(ctx context.Context, modelID string) error
+	ListRoles(ctx context.Context) ([]models.Role, error)
 	ListPermissions(ctx context.Context, chatID string) ([]models.Permission, error)
 	SetPermission(ctx context.Context, chatID, action, rule string) error
+	SaveDag(ctx context.Context, chatID, dagJSON string) error
+	GetDag(ctx context.Context, chatID string) (string, error)
 }
 
 type chat struct {

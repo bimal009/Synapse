@@ -3,12 +3,42 @@ package project
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bimal009/Synapse/configs"
 	"github.com/bimal009/Synapse/internal/models"
 	"github.com/google/uuid"
 )
+
+func validateRole(role string) error {
+	if !models.IsValidRole(role) {
+		return fmt.Errorf("invalid role %q; must be one of: %s", role, strings.Join(models.AllRoles(), ", "))
+	}
+	return nil
+}
+
+func (c *chat) ListRoles(ctx context.Context) ([]models.Role, error) {
+	rows, err := c.db.QueryContext(ctx, `
+		SELECT name, COALESCE(description, '')
+		FROM roles
+		ORDER BY name
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list roles: %w", err)
+	}
+	defer rows.Close()
+
+	var list []models.Role
+	for rows.Next() {
+		var r models.Role
+		if err := rows.Scan(&r.Name, &r.Description); err != nil {
+			return nil, err
+		}
+		list = append(list, r)
+	}
+	return list, rows.Err()
+}
 
 func (c *chat) LoadConfig(ctx context.Context, chatID string) (map[string]configs.ModelConfig, error) {
 	rows, err := c.db.QueryContext(ctx, `
@@ -49,6 +79,9 @@ func (c *chat) LoadConfig(ctx context.Context, chatID string) (map[string]config
 func (c *chat) AddModel(ctx context.Context, m models.Model) error {
 	if m.Name == "" || m.Model == "" || m.URL == "" || m.Role == "" {
 		return fmt.Errorf("name, model, url and role are required")
+	}
+	if err := validateRole(m.Role); err != nil {
+		return err
 	}
 
 	m.ID = uuid.New().String()
@@ -96,6 +129,9 @@ func (c *chat) UpdateModel(ctx context.Context, m models.Model) error {
 	if m.Name == "" || m.Model == "" || m.URL == "" || m.Role == "" {
 		return fmt.Errorf("name, model, url and role are required")
 	}
+	if err := validateRole(m.Role); err != nil {
+		return err
+	}
 
 	res, err := c.db.ExecContext(ctx, `
 		UPDATE models
@@ -130,6 +166,9 @@ func (c *chat) DeleteModel(ctx context.Context, modelID string) error {
 func (c *chat) SetActiveModel(ctx context.Context, chatID string, role string, modelID string) error {
 	if chatID == "" || role == "" || modelID == "" {
 		return fmt.Errorf("chatID, role and modelID are required")
+	}
+	if err := validateRole(role); err != nil {
+		return err
 	}
 
 	_, err := c.db.ExecContext(ctx, `

@@ -149,8 +149,8 @@ always be present; others have sensible defaults.
   timeout: 600 # seconds before the task is force-failed
   priority: 2 # higher = scheduled first among ready tasks
   tags: [design, backend] # free-form labels for filtering/grouping
-  owner: planner-agent # optional: which agent ROLE runs it (routing)
-  model_role: reasoning # optional: capability TIER; runtime resolves to a real model
+  owner: planner # optional: human-readable label for who runs it
+  model_role: reasoning # the agent ROLE that runs this task; one of the fixed roles
 ```
 
 ### Field reference
@@ -170,8 +170,8 @@ always be present; others have sensible defaults.
 | `timeout`      | recommended | Hard limit in seconds; exceeding it fails the task (subject to retries).                                                                                                                             |
 | `priority`     | optional    | Tie-breaker when multiple tasks are `ready` and resources are scarce.                                                                                                                                |
 | `tags`         | optional    | Labels for grouping, filtering, routing to agent types.                                                                                                                                              |
-| `owner`        | optional    | The agent role this task routes to (e.g. `coder-agent`, `researcher-agent`). Selects _which agent_ runs it.                                                                                          |
-| `model_role`   | optional    | The capability tier this task needs (e.g. `fast`, `coding`, `reasoning`, `planning`). Selects _which model_. The runtime resolves it to a concrete model at dispatch — never a hardcoded model name. |
+| `owner`        | optional    | Free-form human-readable label for who runs the task. Decorative; routing is driven by `model_role`.                                                                                                 |
+| `model_role`   | recommended | The agent role that runs this task. Must be one of the fixed roles available for the chat (`planner`, `reasoning`, `coder`, `tester`, `qa`, `analyst`, `reviewer`, `researcher`, `vision`, `architect`, `designer`, `devops`, `security`, `writer`, `editor`, `data`, `summarizer`, `general`). Never a concrete model name. |
 
 **Why `inputs`/`outputs` matter even though `dependencies` exists.** `dependencies`
 encodes _control flow_ (ordering). `inputs`/`outputs` encode _data flow_. Keeping
@@ -179,54 +179,49 @@ both lets a validator catch a whole class of bugs: if task B lists `inputs:
 [schema.json]` but no completed ancestor produces `schema.json`, the DAG is
 broken even though the dependency list might look fine.
 
-### Routing: `owner` vs `model_role`
+### Routing: `model_role`
 
-These are two _different_ axes, and a task usually sets both:
+`model_role` names the **agent role** that runs the task. It is the routing key:
+the runtime maps the role to whichever concrete model the user has configured for
+that role on _this_ machine, at dispatch time. `owner` is just a human-readable
+label and does not affect routing.
 
-- **`owner`** answers _"which agent runs this?"_ — it routes the task to a
-  specialized persona (a coder-agent, a researcher-agent, a critic-agent). The
-  agent persona determines the role template / system prompt the task runs under.
-- **`model_role`** answers _"which model does it run on?"_ — it names a capability
-  tier, not a product. The runtime maps that tier to whatever concrete model is
-  installed on _this_ machine.
+**Use a role, never a model name.** The planner must not write
+`model_role: "qwen2.5-coder:32b"`. It writes a role like `coder`, and the runtime
+resolves role → concrete model at dispatch, reading the chat's live model config.
+This matters for two reasons:
 
-They correlate but are not the same. A `coder-agent` task is usually
-`model_role: coding`, but a cheap classification step owned by the same agent
-might be `model_role: fast`. Keep them separate so you can tune cost/quality
-(model tier) independently of behavior (agent role).
-
-**Emit a tier, never a model name.** The planner must not write
-`model_role: "qwen2.5-coder:32b"`. It writes a tier like `coding`, and the
-runtime resolves tier → concrete model **at dispatch time**, reading the live
-registry of installed models. This matters for two reasons:
-
-1. **Grounding/portability.** Every machine has a different model set. A
-   hardcoded tag breaks the moment a user hasn't pulled it; a tier always
-   resolves to _something they actually have_.
+1. **Grounding/portability.** Every machine has a different model set. A hardcoded
+   tag breaks the moment a user hasn't pulled it; a role always resolves to
+   _something they actually have configured_.
 2. **No snapshot coupling.** Resolving at dispatch (not at planning time) means a
-   DAG planned yesterday still runs after the user swaps or removes a model —
-   the runtime just re-resolves the tier against the current registry.
+   DAG planned yesterday still runs after the user swaps a model behind a role.
 
-Standard tiers (a system may define its own): `planning` (decomposition,
-orchestration), `reasoning` (analysis, research, review), `coding`
-(implementation, tests), `fast` (cheap, high-volume steps: routing,
-classification, short validations). Per-task generation params (temperature,
-etc.) are tier defaults, overridable on a single task only when it genuinely
-needs it.
+**Only use roles that are available.** Each run, the planner is told which roles
+are configured for the chat (under _Available agent roles_). Assign `model_role`
+only from that list, using the exact role name. The full role vocabulary is:
+`planner` (decomposition, orchestration), `reasoning` (analysis, review),
+`coder` (implementation), `tester` (writing/running tests), `qa` (quality),
+`analyst`, `reviewer`, `researcher`, `vision`, `architect`, `designer`, `devops`,
+`security`, `writer`, `editor`, `data`, `summarizer`, and `general` (cheap,
+high-volume steps).
+
+### How the DAG is stored and run (Synapse)
+
+The DAG is **not a file**. The planner builds the whole plan as one JSON object
+and saves it with the `create_dag` tool, which validates it and stores it in the
+database for the chat. Read the current plan back with `get_dag` (it takes no
+arguments and returns the stored JSON) — never read a `dag.json` file.
 
 ### Task fields are the prompt source
 
-Do **not** have the planner author a separate prompt (inline or as a
-`prompts/<task>.prompt` file). A task's `description` + `objective` + `inputs` +
-`outputs` _already are_ its instructions. The runtime builds the agent's actual
-prompt at dispatch by composing: the embedded role template for `owner` (its
-persona + tool format) + this task's fields + the user's instruction layers
-(global / project / conversation). Because the structured DAG is the single
-source of truth, there is nothing to drift out of sync. Practical consequence:
-**write `description` and `objective` as if they are the instructions the agent
-will receive — because, rendered, they are.** (A rendered copy may be dumped to
-`prompts/` for the user to inspect, but it is a throwaway artifact, never read
-back as authoritative.)
+A task's `description` + `objective` + `inputs` + `outputs` _already are_ its
+instructions. The runtime builds the agent's actual prompt at dispatch by
+composing the role template for `model_role` + this task's fields + the user's
+instruction layers. Because the stored DAG is the single source of truth, there
+is nothing to drift out of sync. Practical consequence: **write `description` and
+`objective` as if they are the instructions the agent will receive — because,
+rendered, they are.**
 
 ---
 
@@ -1366,7 +1361,7 @@ dag:
         dependencies: [],
         status: pending,
         owner: planner-agent,
-        model_role: planning,
+        model_role: planner,
         outputs: [task_plan],
         priority: 5,
       }
@@ -1408,7 +1403,7 @@ dag:
         dependencies: [research, design_api, write_specs],
         status: pending,
         owner: coder-agent,
-        model_role: coding,
+        model_role: coder,
         inputs: [research_notes, interface_spec, acceptance_specs],
         outputs: [diff],
         retry_policy: { max_attempts: 2, backoff: fixed, backoff_seconds: 5 },
@@ -1430,7 +1425,7 @@ dag:
         dependencies: [code],
         status: pending,
         owner: tester-agent,
-        model_role: coding,
+        model_role: coder,
         inputs: [diff, acceptance_specs],
         outputs: [tests],
       }
@@ -1440,7 +1435,7 @@ dag:
         dependencies: [review, write_tests],
         status: pending,
         owner: coder-agent,
-        model_role: coding,
+        model_role: coder,
         inputs: [diff, review_comments],
         outputs: [final_diff],
       }
@@ -1449,7 +1444,7 @@ dag:
         title: All checks green gate,
         dependencies: [fix_review],
         status: pending,
-        model_role: fast,
+        model_role: general,
         validation:
           ["tests pass on final_diff", "no unresolved review comments"],
         retry_policy:
@@ -1461,21 +1456,20 @@ dag:
         dependencies: [gate_all_green],
         status: pending,
         owner: docs-agent,
-        model_role: fast,
+        model_role: general,
         inputs: [final_diff],
         outputs: [doc_updates],
         optional: true,
       }
 ```
 
-**Why this design.** Each task carries an `owner` so the runtime routes it to the
-right specialized agent — this is where the DAG meets a multi-agent scheduler.
-Each also carries a `model_role` tier: `code`/`write_tests`/`fix_review` ask for
-`coding`, the analysis-heavy `research`/`design_api`/`review` ask for `reasoning`,
-and the cheap `gate_all_green`/`document` steps ask for `fast` — so a small model
-handles high-volume low-stakes work while the expensive model is reserved for
-where it matters. The runtime resolves each tier to a concrete installed model at
-dispatch. The planner emits everything as `pending`; the scheduler spawns
+**Why this design.** Each task carries a `model_role` naming the agent role that
+runs it: `code`/`write_tests`/`fix_review` use `coder`, the analysis-heavy
+`research`/`design_api`/`review` use `reasoning`, and the cheap
+`gate_all_green`/`document` steps use `general` — so a small model handles
+high-volume low-stakes work while the expensive model is reserved for where it
+matters. The runtime resolves each role to the concrete model the user configured
+for it, at dispatch. The planner emits everything as `pending`; the scheduler spawns
 `research`, `design_api`, and `write_specs` in parallel because they share only
 the `plan` dependency. `review` and `write_tests` also parallelize off `code`.
 `priority` nudges the scheduler to favor the critical-path nodes (`plan`, `code`)
@@ -1929,12 +1923,12 @@ Hold every emitted DAG to these bars.
 
 ### Routing
 
-- Every task that an agent runs sets an `owner` (which agent) and a `model_role`
-  (which capability tier).
-- `model_role` is always a tier (`fast` / `coding` / `reasoning` / `planning`),
-  never a concrete model name or tag — the runtime resolves it at dispatch.
-- Reserve the expensive tier for genuinely hard tasks; push high-volume,
-  low-stakes steps (routing, short validations) to `fast`.
+- Every task that an agent runs sets a `model_role` naming the agent role that
+  runs it (one of the fixed roles available for the chat).
+- `model_role` is always a role name (`planner`, `coder`, `reasoning`, …), never a
+  concrete model name or tag — the runtime resolves it at dispatch.
+- Reserve expensive roles for genuinely hard tasks; push high-volume, low-stakes
+  steps (routing, short validations) to a cheap role like `general`.
 
 ### Readability
 
@@ -1984,12 +1978,14 @@ When given any objective:
 5. Find what can run in parallel.
 6. Insert validation gates between trusted phases.
 7. Add an explicit completion node.
-8. Tag each agent task with an `owner` (which agent) and a `model_role` tier
-   (which model) — tiers, never model names.
+8. Tag each agent task with a `model_role` (the agent role that runs it) — a role
+   name from the available set, never a model name.
 9. Topologically sort to prove it's acyclic; shorten the critical path.
 10. Run the Section 9 checklist, then emit every task as `pending`.
+11. Save the whole plan with `create_dag` (it validates and stores it); read it
+    back with `get_dag`.
 
 A good DAG is **atomic** (one job per node), **explicit** (every edge real and
 declared), **parallel** (no false serialization), **guarded** (gates where trust
 is transferred), **recoverable** (retries, failure policy, idempotent nodes), and
-**routed** (`owner` + `model_role` tier on every agent task).
+**routed** (a valid `model_role` on every agent task).
